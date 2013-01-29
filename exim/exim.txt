@@ -1,0 +1,168 @@
+# CLW Mailstore
+# Excerpts from a much larger Exim configuration file
+# Please not the start and end points of the configuration block such as
+# 'begin_acl'
+
+# Delclaration of the database connection used for Mailstore
+hide pgsql_servers = <hostname>/<dbname>/<user>/<password>
+# ...
+
+# SQL statement declared near the top of the Exim configuration file
+# This SQL statement inserts header records into the log table
+RECORD_SQL = INSERT INTO log \
+         (t_message_id, t_path, t_message_date, t_subject, t_recipients, \
+          t_from, t_to, t_cc, n_size) \
+         VALUES \
+         ('${quote_pgsql:$message_id}', \
+          '${quote_pgsql:CLW_SHADOWDIR${length_10:$tod_log}/${message_id}}',  \
+          '${quote_pgsql:$h_date:}',  \
+          '${quote_pgsql:${rfc2047:$h_subject:}}',  \
+          '${quote_pgsql:$recipients}',  \
+          '${quote_pgsql:$h_from:}',  \
+          '${quote_pgsql:$h_to:}',  \
+          '${quote_pgsql:$h_cc:}',  \
+          '$message_size')
+
+# Optional SQL statement used to insert records about oversized email
+# into the database
+# OVERSIZE_SQL = INSERT INTO oversizemail \
+#          (t_message_id, t_date, t_from, t_to, t_cc, t_subject, n_size) \
+#          VALUES \
+#          ( \
+#           '${quote_pgsql:$message_id}', \
+#            '${quote_pgsql:$h_date:}', \
+#            '${quote_pgsql:$h_from:}', \
+#            '${quote_pgsql:$h_to:}', \
+#            '${quote_pgsql:$h_cc:}', \
+#            '${quote_pgsql:${rfc2047:$h_subject:}}', \
+#            '$message_size' \
+#          ) 
+
+daemon_smtp_ports = 25 : 587
+#...
+
+begin acl
+    # The first ACL is used for every RCPT command in an incoming SMTP
+    # message. Each RCPT command specifies one of the message's
+    # recipients. The ACL statements are considered in order, until the
+    # recipient address is either accepted or rejected. The RCPT command
+    # is then accepted or rejected, according to the result of the ACL
+    # processing.
+    #...
+    accept
+
+acl_check_mail:
+    # This access control list is used for every MAIL command in an
+    # incoming SMTP message. The tests are run in order until the
+    # address is either accepted or denied.
+    #...
+    accept
+
+acl_check_rcpt:
+    # The RCPT ACL controls which recipients are accepted for an
+    # incoming message - if a configuration does not provide an ACL to
+    # check recipients, no SMTP mail can be accepted.
+    #...
+
+acl_check_data:
+    # The DATA ACL allows the contents of a message to be checked.
+    # Some mail will have been rejected before now.
+    #...
+
+    # The warn condition is documented in the Exim specification
+    # document under the section "42.20 ACL modifiers"
+    # 
+    # From "42.17 ACL verbs":
+    # * warn: If all the conditions are true, a line specified by the
+    # log_message modifier is written to Exim's main log. Control always
+    # passes to the next ACL statement. If any condition is false, the
+    # log line is not written. If an identical log line is requested
+    # several times in the same message, only one copy is actually
+    # written to the log. If you want to force duplicates to be written,
+    # use the logwrite modifier instead.
+    # 
+    # If log_message is not present, a warn verb just checks its
+    # conditions and obeys any "immediate" modifiers (such as control,
+    # set, logwrite, and add_header) that appear before the first
+    # failing condition. There is more about adding header lines in
+    # section 42.23.
+    # 
+    # The following warn condition line inserts a log line into the
+    # mailstore database. See 'docs' for a discussion of where this
+    # statement is placed with regard to other spam/virus scanning
+    # blocks in a configuration file.
+
+    warn condition = ${lookup pgsql{RECORD_SQL}}
+
+    # Optional configuration to store ovesized email details into the
+    # database. This uses the variable CLW_MESSAGE_SIZE_LIMIT which is
+    # declared near the top of the configuration file/s.
+    # deny
+    #     message = "Message is larger than <clientname> size limit of CLW_MESSAGE_SIZE_LIMIT"
+    #     condition = ${if >{$message_size}{CLW_MESSAGE_SIZE_LIMIT}{yes}{no}}
+    #     # This configuration line inserts a record into the
+    #     # oversizemail table
+    #     condition = ${lookup pgsql{OVERSIZE_SQL}}
+    #     log_message   = "SIZE: $message_size"
+
+    #...
+
+begin routers
+    # Routers are the modules in Exim that make decisions about where to
+    # send messages. An address is passed to each router in turn, until
+    # it is either accepted, or failed. This means that the order in
+    # which you define the routers matters. 
+    #...
+
+    # This shadow router sends all SMTP traffic to the
+    # SHADOW_CLW_DELIVERY transport, then marks this router as unseen so
+    # that the email can be routed as normal
+    T_CLW_SHADOW_ALL:
+      debug_print = "R: clw shadow delivery"
+      driver = accept
+      transport = SHADOW_CLW_DELIVERY
+      unseen
+
+    #...
+
+begin transports
+    # Transports define mechanisms for actually delivering messages. They
+    # operate only when referenced from routers, so the order in which
+    # they are defined does not matter.
+    #...
+
+    # The SHADOW_CLW_DELIVERY transport saves files routed by the
+    # T_CLW_SHADOW_ALL router to a directory with the day's date under
+    # the CLW_SHADOWDIR directory. Each individual file is saved
+    # separately using the unique Exim message id as a filename. 
+    SHADOW_CLW_DELIVERY:
+        debug_print = "T: shadow_delivery"
+        driver = appendfile
+        group = <mailgroup>
+        user = <mailuser>
+        mode = 0660
+        envelope_to_add = true
+        return_path_add = true
+        # $tod_log:
+        # The time and date in the format used for writing Exim's log
+        # files, for example: 1995-10-12 15:32:29, but without a
+        # timezone.
+        # $message_exim_id:
+        # When a message is being received or delivered, this variable
+        # contains the unique message id that is generated and used by
+        # Exim to identify the message. An id is not created for a message
+        # until after its header has been successfully received. Note:
+        # This is not the contents of the Message-ID: header line; it is
+        # the local id that Exim assigns to the message, for example:
+        # "1BXTIK-0001yO-VA".
+        file = CLW_SHADOWDIR${length_10:$tod_log}/${message_exim_id}
+        use_lockfile = false
+
+    #...
+
+begin retry
+
+begin rewrite
+
+begin authenticators
+
